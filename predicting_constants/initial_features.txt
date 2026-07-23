@@ -1,0 +1,15 @@
+datahora_transacao
+nome_estabelecimento
+tipo_estabelecimento
+valor_transacao
+nome_cliente
+cidade
+flag_fraude
+device_type
+is_new_device
+temperatura_celsius
+codigo_postal
+score_interno
+turno
+valor_categoria
+cidade_regiao

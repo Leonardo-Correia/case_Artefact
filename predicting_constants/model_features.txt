@@ -1,0 +1,32 @@
+is_new_device
+is_weekend
+changed_cidade
+changed_tipo_estabelecimento
+changed_device_type
+changed_turno
+changed_valor_categoria
+month
+fraudes_ultimos_30d
+tipo_estabelecimento_E-commerce
+tipo_estabelecimento_Food & Beverage
+tipo_estabelecimento_Fuel
+tipo_estabelecimento_Pharmacy
+tipo_estabelecimento_Retail
+tipo_estabelecimento_Supermarket
+cidade_Belo Horizonte
+cidade_Curitiba
+cidade_Porto Alegre
+cidade_Recife
+cidade_Rio de Janeiro
+cidade_Salvador
+cidade_São Paulo
+device_type_desktop
+device_type_mobile
+device_type_tablet
+turno_madrugada
+turno_manha
+turno_noite
+turno_tarde
+valor_categoria_alto
+valor_categoria_baixo
+valor_categoria_medio
