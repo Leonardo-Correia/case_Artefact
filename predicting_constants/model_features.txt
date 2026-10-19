@@ -30,3 +30,15 @@ turno_tarde
 valor_categoria_alto
 valor_categoria_baixo
 valor_categoria_medio
+compras_ultimas_24h
+compras_ultimos_7d
+compras_ultimos_30d
+horas_desde_ultima_compra
+valor_medio_ultimos_30d
+valor_desvio_padrao_ultimos_30d
+valor_diferenca_media_30d
+valor_razao_media_30d
+sem_historico_anterior
+novo_device_noite
+novo_device_mudanca_cidade
+novo_device_razao_valor_30d
