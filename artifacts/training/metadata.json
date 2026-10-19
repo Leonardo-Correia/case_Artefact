@@ -1,0 +1,14 @@
+{
+  "python": "3.12.3",
+  "sklearn": "1.9.1",
+  "split": "random 84/8/8; test random_state=21; validation random_state=42, stratified",
+  "rows": {
+    "train": 439761,
+    "validation": 41882,
+    "test": 41882
+  },
+  "feature_count_before_imputation": 44,
+  "feature_count_after_imputation": 50,
+  "training_only_preprocessing": true,
+  "note": "Historical fraud labels retain the availability assumptions of the original project. Scores are not calibrated fraud probabilities."
+}
