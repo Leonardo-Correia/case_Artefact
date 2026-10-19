@@ -17,22 +17,28 @@ def transform_dtypes(dataframe: pd.DataFrame,
     ) -> pd.DataFrame:
     
     """
-    Function created to transform dtypes of every feature to assure correct workflow.
+    Transform input column types for the training or prediction workflow.
 
     Parameters
     ----------
         dataframe : pd.DataFrame
-            Dataframe to have features created.
-        
-        feature_list : list
-            List with initial features list to workflow.
+            Input transactions whose columns will be selected and converted.
 
-        making_predictions : bool 
-            Boolean variable to decide weather the function will be used for predictions or not.
+        feature_list : list
+            Expected input features, including flag_fraude for training.
+
+        making_predictions : bool
+            Whether to exclude the target for prediction. Default is True.
+
     Returns
-        making_predictions : pd.DataFrame
-            Dataframe with correct dtypes features
     -------
+        dataframe : pd.DataFrame or None
+            Selected transactions with datetime timestamps, or None when the timestamp feature is absent.
+
+    Notes
+    -----
+    In prediction mode, the supplied feature list is modified in place.
+
     """
     # Filtering features according to feature_list
     if making_predictions:
@@ -52,22 +58,143 @@ def transform_dtypes(dataframe: pd.DataFrame,
         print(f"Used dataframe has no feature called datahora_transacao")
 
 
-def create_features(dataframe: pd.DataFrame
-    ) -> pd.DataFrame:
+BEHAVIOR_NUMERICAL_FEATURES = [
+    "compras_ultimas_24h", "compras_ultimos_7d", "compras_ultimos_30d",
+    "horas_desde_ultima_compra", "valor_medio_ultimos_30d",
+    "valor_desvio_padrao_ultimos_30d", "valor_diferenca_media_30d",
+    "valor_razao_media_30d",
+]
 
+
+def create_behavior_features(dataframe: pd.DataFrame) -> pd.DataFrame:
     """
-    Function for Creating features that will be used in the model training and deploying 
+    Create customer purchase history features using strictly earlier transactions.
 
     Parameters
     ----------
         dataframe : pd.DataFrame
-            Dataframe to have features created.
+            Transactions containing customer, timestamp, and amount columns.
 
     Returns
-        dataframe : pd.Dataframe
-            Dataframe with new features
     -------
+        result : pd.DataFrame
+            Transactions with historical counts and spending statistics, preserving row order and index.
+
+    Notes
+    -----
+    Windows include the left boundary and exclude the current timestamp.
+    Missing means and intervals remain NaN; sample standard deviation requires
+    two earlier purchases. Ratios with a zero historical mean remain NaN.
+
     """
+    # Copy transactions and sort customer histories while preserving row positions.
+    result = dataframe.copy()
+    history = dataframe[["nome_cliente", "datahora_transacao", "valor_transacao"]].copy()
+    history.index = pd.RangeIndex(len(history))
+    history = history.sort_values(["nome_cliente", "datahora_transacao"], kind="stable")
+    groups = history.groupby("nome_cliente", sort=False, dropna=False)
+
+    # Shift distinct timestamps so simultaneous purchases never see each other.
+    distinct = history[["nome_cliente", "datahora_transacao"]].drop_duplicates().copy()
+    distinct["previous_time"] = distinct.groupby(
+        "nome_cliente", sort=False, dropna=False
+    )["datahora_transacao"].shift()
+    previous = history.reset_index().merge(
+        distinct, on=["nome_cliente", "datahora_transacao"], how="left", validate="many_to_one"
+    ).set_index("index").reindex(range(len(result)))
+    result["horas_desde_ultima_compra"] = (
+        (previous["datahora_transacao"] - previous["previous_time"])
+        .dt.total_seconds().to_numpy() / 3600
+    )
+    # Calculate the interval since the previous distinct transaction timestamp.
+    result["sem_historico_anterior"] = previous["previous_time"].isna().to_numpy().astype(int)
+
+    for window, name in [
+        ("24h", "compras_ultimas_24h"),
+        ("7D", "compras_ultimos_7d"),
+        ("30D", "compras_ultimos_30d"),
+    ]:
+        rolling = groups.rolling(window, on="datahora_transacao", closed="left", min_periods=1)
+        counts = rolling["valor_transacao"].count().reset_index(level=0, drop=True)
+        result[name] = pd.Series(counts.to_numpy(), index=history.index).reindex(range(len(result))).fillna(0).to_numpy()
+        if window == "30D":
+            for statistic, column in [
+                ("mean", "valor_medio_ultimos_30d"),
+                ("std", "valor_desvio_padrao_ultimos_30d"),
+            ]:
+                values = getattr(rolling["valor_transacao"], statistic)()
+                result[column] = pd.Series(values.to_numpy(), index=history.index).reindex(range(len(result))).to_numpy()
+
+    # Calculate purchase counts and spending statistics over historical windows.
+    result["valor_diferenca_media_30d"] = result["valor_transacao"] - result["valor_medio_ultimos_30d"]
+    denominator = result["valor_medio_ultimos_30d"].replace(0, np.nan)
+    result["valor_razao_media_30d"] = result["valor_transacao"] / denominator
+    return result
+
+
+MULTIVARIATE_NUMERICAL_FEATURES = ["novo_device_razao_valor_30d"]
+MULTIVARIATE_FEATURES = [
+    "novo_device_noite", "novo_device_mudanca_cidade",
+    *MULTIVARIATE_NUMERICAL_FEATURES,
+]
+
+
+def create_multivariate_features(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create interactions between device novelty, transaction time, city changes, and spending.
+
+    Parameters
+    ----------
+        dataframe : pd.DataFrame
+            Transactions containing device, time-period, city-change, and historical amount features.
+
+    Returns
+    -------
+        result : pd.DataFrame
+            Transactions with binary interactions and a numerical spending interaction.
+
+    Notes
+    -----
+    No labels or fitted statistics are used. Missing historical ratios remain
+    missing, including for known devices.
+
+    """
+    # Copy transactions and identify new devices.
+    result = dataframe.copy()
+    new_device = result["is_new_device"].astype(bool)
+    # Combine device novelty with nighttime transactions and city changes.
+    result["novo_device_noite"] = (
+        new_device & result["turno"].eq("noite")
+    ).astype(int)
+    result["novo_device_mudanca_cidade"] = (
+        new_device & result["changed_cidade"].eq(1)
+    ).astype(int)
+    # Preserve missing historical ratios in the numerical interaction.
+    result["novo_device_razao_valor_30d"] = (
+        new_device.astype(int) * result["valor_razao_media_30d"]
+    )
+    return result
+
+
+def create_features(dataframe: pd.DataFrame
+    ) -> pd.DataFrame:
+
+    """
+    Create temporal, historical fraud, behavioral change, and interaction features.
+
+    Parameters
+    ----------
+        dataframe : pd.DataFrame
+            Transactions with customer, timestamp, amount, categories, and fraud labels.
+
+    Returns
+    -------
+        dataframe : pd.DataFrame
+            Transactions with engineered features in their original row order.
+
+    """
+
+    dataframe = create_behavior_features(dataframe)
 
     # Temporal feature "month", "day_of_week", "is_weekend"
     dataframe['month'] = dataframe['datahora_transacao'].dt.month
@@ -77,34 +204,22 @@ def create_features(dataframe: pd.DataFrame
     dataframe['is_weekend'] = dataframe['datahora_transacao'].dt.dayofweek >= 5
     ################################################
 
-    # Adding "number of fraudlent transactions of the last month" feature
-    dataframe[f'fraudes_ultimos_{30}d'] = 0.0
-
-    for client in dataframe['nome_cliente'].unique():
-        
-        df_client_temp = (
-            dataframe[dataframe['nome_cliente'] == client]
-            .sort_values('datahora_transacao')
-            .copy()
-        )
-
-        fraude_rolling = (
-            df_client_temp
-            .set_index('datahora_transacao')['flag_fraude']
-            .rolling(
-                window=f'{30}D',
-                closed='left'
-            )
-            .sum()
-            .fillna(0)
-            .to_numpy()
-        )
-
-        dataframe.loc[
-            df_client_temp.index,
-            f'fraudes_ultimos_{30}d'
-        ] = fraude_rolling
-    ################################################
+    # Same past-label window as before, grouped once instead of scanning
+    # the full dataframe separately for every client.
+    fraud_history = dataframe[["nome_cliente", "datahora_transacao", "flag_fraude"]].copy()
+    fraud_history.index = pd.RangeIndex(len(fraud_history))
+    fraud_history = fraud_history.sort_values(
+        ["nome_cliente", "datahora_transacao"], kind="stable"
+    )
+    fraud_values = (
+        fraud_history.groupby("nome_cliente", sort=False, dropna=False)
+        .rolling("30D", on="datahora_transacao", closed="left")["flag_fraude"]
+        .sum()
+    )
+    dataframe["fraudes_ultimos_30d"] = (
+        pd.Series(fraud_values.to_numpy(), index=fraud_history.index)
+        .reindex(range(len(dataframe))).fillna(0).to_numpy()
+    )
 
     # Creating feature for "changing current state"
     dataframe["_original_order"] = range(len(dataframe))
@@ -132,8 +247,7 @@ def create_features(dataframe: pd.DataFrame
         feature_change = f"changed_{column}"
 
         dataframe[feature_change] = (
-            grouped_clients[column]
-            .transform(lambda values: values.ne(values.shift()))
+            dataframe[column].ne(grouped_clients[column].shift())
             .astype(int)
         )
 
@@ -148,7 +262,7 @@ def create_features(dataframe: pd.DataFrame
             feature_change
         ] = 0
 
-    # Retorna para a ordem original
+    # Restore the original row order
     dataframe = (
         dataframe
         .sort_values("_original_order")
@@ -156,7 +270,7 @@ def create_features(dataframe: pd.DataFrame
         .reset_index(drop=True)
     )
 
-    return dataframe
+    return create_multivariate_features(dataframe)
 
 
 def preprocessing_features(
@@ -167,42 +281,39 @@ def preprocessing_features(
     encoder: OneHotEncoder | None = None
 ) -> tuple[pd.DataFrame, StandardScaler, OneHotEncoder]:
     """
-    Applies StandardScaler to numerical features and OneHotEncoder
-    to categorical features.
-
-    If scaler and encoder are not provided, they are created and fitted.
-    Otherwise, the previously fitted objects are only used to transform
-    the input data.
+    Standardize numerical features and one-hot encode categorical features.
 
     Parameters
     ----------
-    dataframe : pd.DataFrame
-        Dataframe to be transformed.
+        dataframe : pd.DataFrame
+            Transactions to transform.
 
-    numerical_features : list[str]
-        Numerical columns that will be standardized.
+        numerical_features : list[str]
+            Numerical columns to standardize.
 
-    categorical_features : list[str]
-        Categorical columns that will be one-hot encoded.
+        categorical_features : list[str]
+            Categorical columns to one-hot encode.
 
-    scaler : StandardScaler, optional
-        Previously fitted scaler.
+        scaler : StandardScaler, optional
+            Fitted scaler to reuse; when None, fit a new scaler.
 
-    encoder : OneHotEncoder, optional
-        Previously fitted encoder.
+        encoder : OneHotEncoder, optional
+            Fitted encoder to reuse; when None, fit a new encoder.
 
     Returns
     -------
-    transformed_dataframe : pd.DataFrame
-        Dataset after encoding and scaling.
+        transformed_dataframe : pd.DataFrame
+            Remaining columns joined with scaled and encoded features.
 
-    scaler : StandardScaler
-        Fitted scaler.
+        scaler : StandardScaler
+            Fitted numerical scaler.
 
-    encoder : OneHotEncoder
-        Fitted encoder.
+        encoder : OneHotEncoder
+            Fitted categorical encoder.
+
     """
 
+    # Copy the input before validating and transforming its columns.
     dataframe = dataframe.copy()
 
     # Verify if the features are in the dataframe
@@ -287,23 +398,30 @@ def removing_colunms_for_model(
         making_predictions: bool = True
 )-> pd.DataFrame:
     """
-    Function created for removing eny unecessary feature.
+    Select the columns used for model training or prediction.
 
     Parameters
     ----------
         dataframe : pd.DataFrame
-            Dataframe to have features removed.
+            Transactions whose model columns will be selected.
 
         model_feature_list : list[str]
-            List of features that the model uses for train and prediction
+            Ordered feature names used by the model.
 
         making_predictions : bool
-            Default = True; Boolean variable for defining if the function will be used for training or evaluation.
+            Whether to omit the target column. Default is True.
+
     Returns
-        dataframe : pd.Dataframe
-            Dataframe using removed selected features
     -------
+        dataframe : pd.DataFrame
+            Selected model inputs, including flag_fraude when preparing training data.
+
+    Notes
+    -----
+    In training mode, flag_fraude is appended to the supplied feature list.
+
     """
+    # Select model inputs and include the target only for training.
     if making_predictions:
         return dataframe[model_feature_list]
     else:
